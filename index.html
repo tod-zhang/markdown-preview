@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Markdown Preview with Highlighting</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    color: #333;
+  }
+
+  #header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: #f5f5f5;
+    border-bottom: 1px solid #ddd;
+  }
+
+  #header h1 { font-size: 16px; font-weight: 600; color: #c0392b; }
+
+  #status { font-size: 13px; color: #999; }
+
+  #main { flex: 1; display: flex; overflow: hidden; }
+
+  #left-panel, #right-panel {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  .panel-label {
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #999;
+    background: #fafafa;
+    border-bottom: 1px solid #e0e0e0;
+  }
+
+  #source-input {
+    flex: 1; width: 100%; padding: 16px;
+    border: none; outline: none; resize: none;
+    font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    font-size: 14px; line-height: 1.6;
+    background: #fff; color: #333; tab-size: 4;
+  }
+
+  #source-input::selection { background: #c0392b; color: #fff; }
+
+  #divider {
+    width: 3px; background: #e0e0e0;
+    cursor: col-resize; transition: background 0.2s;
+  }
+  #divider:hover { background: #c0392b; }
+
+  #output {
+    flex: 1; padding: 16px; overflow-y: auto;
+    background: #fff; line-height: 1.7;
+  }
+
+  /* Markdown rendered styles */
+  #output h1, #output h2, #output h3,
+  #output h4, #output h5, #output h6 {
+    margin: 0.8em 0 0.4em; color: #222; line-height: 1.3;
+  }
+  #output h1 { font-size: 1.8em; border-bottom: 1px solid #eee; padding-bottom: 0.3em; }
+  #output h2 { font-size: 1.5em; }
+  #output h3 { font-size: 1.25em; }
+  #output p { margin: 0.6em 0; }
+  #output ul, #output ol { margin: 0.6em 0; padding-left: 2em; }
+  #output li { margin: 0.3em 0; }
+
+  #output pre {
+    background: #f6f8fa; border: 1px solid #e1e4e8;
+    border-radius: 6px; padding: 12px;
+    overflow-x: auto; margin: 0.6em 0;
+  }
+  #output code { font-family: 'SF Mono', 'Fira Code', Consolas, monospace; font-size: 0.9em; }
+  #output pre code { color: #333; }
+  #output :not(pre) > code {
+    background: #f0f0f0; padding: 2px 6px; border-radius: 3px; color: #c0392b;
+  }
+
+  #output blockquote {
+    border-left: 3px solid #c0392b; padding: 0.5em 1em;
+    margin: 0.6em 0; background: #fafafa; color: #555;
+  }
+
+  #output table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+  #output th, #output td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
+  #output th { background: #f5f5f5; font-weight: 600; }
+
+  #output hr { border: none; border-top: 1px solid #e0e0e0; margin: 1em 0; }
+  #output a { color: #0366d6; text-decoration: none; }
+  #output a:hover { text-decoration: underline; }
+  #output img { max-width: 100%; }
+
+  /* Highlight for matched sentence spans and block fallback */
+  .seg-highlight {
+    background: rgba(255, 210, 70, 0.35) !important;
+    border-radius: 2px;
+  }
+
+  #output .placeholder {
+    color: #bbb; font-style: italic; padding: 2em; text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Markdown Preview</h1>
+  <span id="status">Ready</span>
+</div>
+
+<div id="main">
+  <div id="left-panel">
+    <div class="panel-label">Markdown Source</div>
+    <textarea id="source-input" placeholder="Type or paste markdown here..."></textarea>
+  </div>
+  <div id="divider"></div>
+  <div id="right-panel">
+    <div class="panel-label">Rendered HTML — select text to highlight source</div>
+    <div id="output"><div class="placeholder">Preview will appear here</div></div>
+  </div>
+</div>
+
+<script>
+// ─── SegmentParser ───────────────────────────────────────────────────────────
+
+const SegmentParser = (() => {
+  let segId = 0;
+
+  function parse(markdown) {
+    segId = 0;
+    const tokens = marked.lexer(markdown);
+    const segments = [];
+    let offset = 0;
+
+    for (const token of tokens) {
+      const rawLen = token.raw ? token.raw.length : 0;
+      const start = offset;
+      const end = offset + rawLen;
+
+      switch (token.type) {
+        case 'heading':
+          segments.push({ id: segId++, type: 'heading', depth: token.depth, token, start, end });
+          break;
+        case 'paragraph':
+          segments.push({ id: segId++, type: 'paragraph', token, start, end });
+          break;
+        case 'blockquote':
+          segments.push({ id: segId++, type: 'blockquote', token, start, end });
+          break;
+        case 'list':
+          for (const item of (token.items || [])) {
+            const iLen = item.raw ? item.raw.length : 0;
+            segments.push({ id: segId++, type: 'list_item', ordered: token.ordered, token: item, start: offset, end: offset + iLen });
+            offset += iLen;
+          }
+          if (offset < end) offset = end;
+          continue;
+        case 'code':
+          segments.push({ id: segId++, type: 'code', token, start, end });
+          break;
+        case 'table':
+          segments.push({ id: segId++, type: 'table', token, start, end });
+          break;
+        case 'hr':
+          segments.push({ id: segId++, type: 'hr', start, end });
+          break;
+        case 'html':
+          segments.push({ id: segId++, type: 'html', token, start, end });
+          break;
+        case 'space':
+          break;
+        default:
+          if (rawLen) segments.push({ id: segId++, type: 'paragraph', token, start, end });
+          break;
+      }
+      offset = end;
+    }
+    return segments;
+  }
+
+  return { parse };
+})();
+
+
+// ─── Renderer ────────────────────────────────────────────────────────────────
+// Each sentence within a block is wrapped in <span data-src-start data-src-end>
+// so HighlightManager can map at sentence granularity.
+
+const Renderer = (() => {
+  function esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function inline(text) {
+    return marked.parseInline(text || '');
+  }
+
+  // Split text on sentence boundaries (period/!/? followed by whitespace).
+  function splitSentences(text) {
+    const result = [];
+    const re = /[.!?]\s+/g;
+    let last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      const end = m.index + m[0].length;
+      result.push({ text: text.slice(last, end), offset: last });
+      last = end;
+    }
+    if (last < text.length) {
+      result.push({ text: text.slice(last), offset: last });
+    }
+    return result.length ? result : [{ text, offset: 0 }];
+  }
+
+  // Wrap each sentence in a <span> with source offset attributes.
+  // prefixLen = offset of token.text within token.raw (e.g. 2 for "# " in headings)
+  function sentenceSpans(tokenText, segStart, token) {
+    const prefix = token.raw.indexOf(token.text);
+    if (prefix < 0) return inline(tokenText); // can't map, render plain
+    const sents = splitSentences(tokenText);
+    return sents.map(s => {
+      const ss = segStart + prefix + s.offset;
+      const se = ss + s.text.length;
+      return `<span data-src-start="${ss}" data-src-end="${se}">${inline(s.text)}</span>`;
+    }).join('');
+  }
+
+  function render(segments) {
+    const parts = [];
+    let inList = false, listOrdered = false;
+
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const sid = `data-seg-id="${seg.id}"`;
+      const next = segments[i + 1];
+      const isLi = seg.type === 'list_item';
+      const nextIsLi = next && next.type === 'list_item';
+
+      if (isLi && !inList) {
+        inList = true;
+        listOrdered = seg.ordered;
+        parts.push(listOrdered ? '<ol>' : '<ul>');
+      }
+
+      switch (seg.type) {
+        case 'heading':
+          parts.push(`<h${seg.depth} ${sid}>${sentenceSpans(seg.token.text, seg.start, seg.token)}</h${seg.depth}>`);
+          break;
+        case 'paragraph':
+          parts.push(`<p ${sid}>${sentenceSpans(seg.token.text, seg.start, seg.token)}</p>`);
+          break;
+        case 'blockquote': {
+          const inner = (seg.token.tokens || []).map(t => {
+            if (t.type === 'paragraph') return `<p>${inline(t.text)}</p>`;
+            return inline(t.raw || '');
+          }).join('');
+          parts.push(`<blockquote ${sid}>${inner}</blockquote>`);
+          break;
+        }
+        case 'list_item':
+          parts.push(`<li ${sid}>${sentenceSpans(seg.token.text, seg.start, seg.token)}</li>`);
+          break;
+        case 'code':
+          parts.push(`<pre ${sid}><code class="language-${esc(seg.token.lang || '')}">${esc(seg.token.text)}</code></pre>`);
+          break;
+        case 'table':
+          parts.push(renderTable(seg));
+          break;
+        case 'hr':
+          parts.push(`<hr ${sid}>`);
+          break;
+        case 'html':
+          parts.push(`<div ${sid}>${seg.token.raw}</div>`);
+          break;
+        default:
+          parts.push(`<p ${sid}>${seg.token ? sentenceSpans(seg.token.text, seg.start, seg.token) : ''}</p>`);
+          break;
+      }
+
+      if (isLi && !nextIsLi) {
+        parts.push(listOrdered ? '</ol>' : '</ul>');
+        inList = false;
+      }
+    }
+    if (inList) parts.push(listOrdered ? '</ol>' : '</ul>');
+    return parts.join('\n');
+  }
+
+  function renderTable(seg) {
+    const t = seg.token;
+    let html = `<table data-seg-id="${seg.id}"><thead><tr>`;
+    for (const cell of (t.header || [])) {
+      html += `<th>${inline(typeof cell === 'object' ? cell.text : String(cell))}</th>`;
+    }
+    html += '</tr></thead><tbody>';
+    for (const row of (t.rows || [])) {
+      html += '<tr>';
+      for (const cell of row) {
+        html += `<td>${inline(typeof cell === 'object' ? cell.text : String(cell))}</td>`;
+      }
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    return html;
+  }
+
+  return { render };
+})();
+
+
+// ─── HighlightManager ────────────────────────────────────────────────────────
+// Prefers sentence-level <span data-src-start/end> when available,
+// falls back to block-level <[data-seg-id]> for code/hr/table/blockquote.
+
+const HighlightManager = (() => {
+  let segmentMap = new Map();
+  let textarea = null;
+  let outputEl = null;
+
+  function init(ta, out) {
+    textarea = ta;
+    outputEl = out;
+    outputEl.addEventListener('mouseup', onMouseUp);
+  }
+
+  function updateSegments(segments) {
+    segmentMap.clear();
+    for (const seg of segments) segmentMap.set(String(seg.id), seg);
+  }
+
+  function onMouseUp() {
+    setTimeout(() => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) return;
+      const range = sel.getRangeAt(0);
+      clearHighlights();
+
+      let minStart = Infinity, maxEnd = 0, found = false;
+
+      // 1) Sentence-level spans
+      for (const span of outputEl.querySelectorAll('[data-src-start]')) {
+        if (intersects(range, span)) {
+          span.classList.add('seg-highlight');
+          minStart = Math.min(minStart, parseInt(span.dataset.srcStart));
+          maxEnd = Math.max(maxEnd, parseInt(span.dataset.srcEnd));
+          found = true;
+        }
+      }
+
+      // 2) Block-level fallback
+      if (!found) {
+        for (const el of outputEl.querySelectorAll('[data-seg-id]')) {
+          if (intersects(range, el)) {
+            el.classList.add('seg-highlight');
+            const seg = segmentMap.get(el.dataset.segId);
+            if (seg) {
+              minStart = Math.min(minStart, seg.start);
+              maxEnd = Math.max(maxEnd, seg.end);
+              found = true;
+            }
+          }
+        }
+      }
+
+      if (found && minStart < Infinity) {
+        textarea.focus();
+        textarea.setSelectionRange(minStart, maxEnd);
+        scrollToOffset(minStart);
+      }
+    }, 50);
+  }
+
+  // Use a hidden mirror div to measure the exact pixel Y of a character offset,
+  // accounting for line wrapping in the textarea.
+  function scrollToOffset(charOffset) {
+    const mirror = document.createElement('div');
+    const cs = getComputedStyle(textarea);
+    mirror.style.cssText =
+      'position:absolute;top:-9999px;left:-9999px;visibility:hidden;' +
+      'white-space:pre-wrap;word-wrap:break-word;overflow:hidden;' +
+      'width:' + cs.width + ';' +
+      'font-family:' + cs.fontFamily + ';' +
+      'font-size:' + cs.fontSize + ';' +
+      'font-weight:' + cs.fontWeight + ';' +
+      'line-height:' + cs.lineHeight + ';' +
+      'padding:' + cs.padding + ';' +
+      'border:' + cs.border + ';' +
+      'box-sizing:' + cs.boxSizing + ';' +
+      'tab-size:' + cs.tabSize + ';' +
+      'letter-spacing:' + cs.letterSpacing + ';';
+
+    const before = textarea.value.substring(0, charOffset);
+    mirror.appendChild(document.createTextNode(before));
+    const marker = document.createElement('span');
+    marker.textContent = '\u200b';
+    mirror.appendChild(marker);
+
+    document.body.appendChild(mirror);
+    const targetY = marker.offsetTop;
+    document.body.removeChild(mirror);
+
+    textarea.scrollTop = Math.max(0, targetY - textarea.clientHeight / 3);
+  }
+
+  function intersects(range, el) {
+    try {
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      return range.compareBoundaryPoints(Range.END_TO_START, r) <= 0
+          && range.compareBoundaryPoints(Range.START_TO_END, r) >= 0;
+    } catch { return false; }
+  }
+
+  function clearHighlights() {
+    for (const el of outputEl.querySelectorAll('.seg-highlight')) el.classList.remove('seg-highlight');
+  }
+
+  return { init, updateSegments };
+})();
+
+
+// ─── AppController ───────────────────────────────────────────────────────────
+
+const AppController = (() => {
+  let timer = null;
+  let textarea, output, status;
+
+  function init() {
+    textarea = document.getElementById('source-input');
+    output = document.getElementById('output');
+    status = document.getElementById('status');
+
+    HighlightManager.init(textarea, output);
+    textarea.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(renderPreview, 300);
+    });
+    initDivider();
+  }
+
+  function renderPreview() {
+    try {
+      const md = textarea.value;
+      if (!md.trim()) {
+        output.innerHTML = '<div class="placeholder">Preview will appear here</div>';
+        status.textContent = 'Ready';
+        return;
+      }
+      const segments = SegmentParser.parse(md);
+      HighlightManager.updateSegments(segments);
+      output.innerHTML = Renderer.render(segments);
+      status.textContent = `${segments.length} blocks`;
+    } catch (e) {
+      console.error('Render error:', e);
+      status.textContent = 'Error';
+      output.innerHTML = `<div class="placeholder" style="color:#c0392b">${e.message}</div>`;
+    }
+  }
+
+  function initDivider() {
+    const div = document.getElementById('divider');
+    const left = document.getElementById('left-panel');
+    const right = document.getElementById('right-panel');
+    let dragging = false;
+    div.addEventListener('mousedown', e => { dragging = true; e.preventDefault(); });
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      const rect = document.getElementById('main').getBoundingClientRect();
+      const r = Math.max(0.2, Math.min(0.8, (e.clientX - rect.left) / rect.width));
+      left.style.flex = String(r);
+      right.style.flex = String(1 - r);
+    });
+    document.addEventListener('mouseup', () => { dragging = false; });
+  }
+
+  return { init };
+})();
+
+document.addEventListener('DOMContentLoaded', AppController.init);
+</script>
+</body>
+</html>
