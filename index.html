@@ -114,6 +114,20 @@
   #output .placeholder {
     color: #bbb; font-style: italic; padding: 2em; text-align: center;
   }
+
+  #word-count {
+    position: fixed;
+    right: 16px;
+    bottom: 12px;
+    font-size: 12px;
+    color: #999;
+    background: rgba(245, 245, 245, 0.9);
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid #e0e0e0;
+    pointer-events: none;
+    z-index: 10;
+  }
 </style>
 </head>
 <body>
@@ -134,6 +148,8 @@
     <div id="output"><div class="placeholder">Preview will appear here</div></div>
   </div>
 </div>
+
+<div id="word-count">Words: 0</div>
 
 <script>
 // ─── SegmentParser ───────────────────────────────────────────────────────────
@@ -437,24 +453,28 @@ const HighlightManager = (() => {
 
 const AppController = (() => {
   let timer = null;
-  let textarea, output, status;
+  let textarea, output, status, wordCountEl;
 
   function init() {
     textarea = document.getElementById('source-input');
     output = document.getElementById('output');
     status = document.getElementById('status');
+    wordCountEl = document.getElementById('word-count');
 
     HighlightManager.init(textarea, output);
     textarea.addEventListener('input', () => {
       clearTimeout(timer);
       timer = setTimeout(renderPreview, 300);
     });
+    initSyncScroll();
     initDivider();
   }
 
   function renderPreview() {
     try {
       const md = textarea.value;
+      const words = md.trim() ? md.trim().split(/\s+/).length : 0;
+      wordCountEl.textContent = `Words: ${words}`;
       if (!md.trim()) {
         output.innerHTML = '<div class="placeholder">Preview will appear here</div>';
         status.textContent = 'Ready';
@@ -469,6 +489,17 @@ const AppController = (() => {
       status.textContent = 'Error';
       output.innerHTML = `<div class="placeholder" style="color:#c0392b">${e.message}</div>`;
     }
+  }
+
+  function initSyncScroll() {
+    let syncing = false;
+    textarea.addEventListener('scroll', () => {
+      if (syncing) return;
+      syncing = true;
+      const ratio = textarea.scrollTop / (textarea.scrollHeight - textarea.clientHeight || 1);
+      output.scrollTop = ratio * (output.scrollHeight - output.clientHeight);
+      syncing = false;
+    });
   }
 
   function initDivider() {
