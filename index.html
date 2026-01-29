@@ -500,6 +500,13 @@ const AppController = (() => {
       output.scrollTop = ratio * (output.scrollHeight - output.clientHeight);
       syncing = false;
     });
+    output.addEventListener('scroll', () => {
+      if (syncing) return;
+      syncing = true;
+      const ratio = output.scrollTop / (output.scrollHeight - output.clientHeight || 1);
+      textarea.scrollTop = ratio * (textarea.scrollHeight - textarea.clientHeight);
+      syncing = false;
+    });
   }
 
   function initDivider() {
