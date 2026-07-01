@@ -318,15 +318,32 @@ const Renderer = (() => {
 
   function renderTable(seg) {
     const t = seg.token;
+    const raw = t.raw || '';
+    let searchPos = 0;
+
+    // Map each cell's text back to its offset within the table's source,
+    // searching sequentially so repeated values resolve in document order.
+    // This lets a selection inside ONE cell highlight just that cell's
+    // source range instead of falling back to the whole-table block.
+    function cellSpan(cell) {
+      const txt = typeof cell === 'object' ? cell.text : String(cell);
+      const idx = raw.indexOf(txt, searchPos);
+      if (idx < 0 || txt === '') return inline(txt);
+      searchPos = idx + txt.length;
+      const ss = seg.start + idx;
+      const se = ss + txt.length;
+      return `<span data-src-start="${ss}" data-src-end="${se}">${inline(txt)}</span>`;
+    }
+
     let html = `<table data-seg-id="${seg.id}"><thead><tr>`;
     for (const cell of (t.header || [])) {
-      html += `<th>${inline(typeof cell === 'object' ? cell.text : String(cell))}</th>`;
+      html += `<th>${cellSpan(cell)}</th>`;
     }
     html += '</tr></thead><tbody>';
     for (const row of (t.rows || [])) {
       html += '<tr>';
       for (const cell of row) {
-        html += `<td>${inline(typeof cell === 'object' ? cell.text : String(cell))}</td>`;
+        html += `<td>${cellSpan(cell)}</td>`;
       }
       html += '</tr>';
     }
@@ -363,41 +380,111 @@ const HighlightManager = (() => {
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed) return;
       const range = sel.getRangeAt(0);
-      clearHighlights();
 
-      let minStart = Infinity, maxEnd = 0, found = false;
+      // Map each selection boundary to a source offset. This is
+      // character-precise when the rendered text is a verbatim copy of the
+      // source; otherwise it snaps to the enclosing sentence/cell/block.
+      const a = boundaryToSource(range.startContainer, range.startOffset, 'start');
+      const b = boundaryToSource(range.endContainer, range.endOffset, 'end');
 
-      // 1) Sentence-level spans
-      for (const span of outputEl.querySelectorAll('[data-src-start]')) {
-        if (intersects(range, span)) {
-          span.classList.add('seg-highlight');
-          minStart = Math.min(minStart, parseInt(span.dataset.srcStart));
-          maxEnd = Math.max(maxEnd, parseInt(span.dataset.srcEnd));
-          found = true;
-        }
+      let start, end;
+      if (a != null && b != null) {
+        start = Math.min(a, b);
+        end = Math.max(a, b);
+      } else {
+        // Fallback: snap to whichever sentences/blocks the selection touches.
+        const r = blockRange(range);
+        if (!r) return;
+        start = r.start;
+        end = r.end;
       }
 
-      // 2) Block-level fallback
-      if (!found) {
-        for (const el of outputEl.querySelectorAll('[data-seg-id]')) {
-          if (intersects(range, el)) {
-            el.classList.add('seg-highlight');
-            const seg = segmentMap.get(el.dataset.segId);
-            if (seg) {
-              minStart = Math.min(minStart, seg.start);
-              maxEnd = Math.max(maxEnd, seg.end);
-              found = true;
-            }
+      if (start >= end) return;
+      // Reflect the source range WITHOUT stealing focus, so the user's
+      // selection in the output panel stays intact (and copyable).
+      textarea.setSelectionRange(start, end);
+      scrollToOffset(start);
+    }, 50);
+  }
+
+  // Map a DOM selection boundary (container, offsetInNode) to an offset in
+  // the markdown source. Character-precise when the enclosing span's
+  // rendered text still equals the source slice — i.e. no inline markdown
+  // was applied and the text has NOT been translated in place. Otherwise
+  // returns the start/end of the enclosing sentence, or of the block for
+  // code/blockquote/hr where no sentence spans exist.
+  function boundaryToSource(container, offsetInNode, which) {
+    const el = container.nodeType === 3 ? container.parentElement : container;
+    if (!el || !el.closest) return null;
+
+    const span = el.closest('[data-src-start]');
+    if (span) {
+      const s = parseInt(span.dataset.srcStart);
+      const e = parseInt(span.dataset.srcEnd);
+      if (span.textContent === textarea.value.substring(s, e)) {
+        const off = textBefore(span, container, offsetInNode);
+        if (off >= 0) return s + Math.max(0, Math.min(off, e - s));
+      }
+      return which === 'start' ? s : e;
+    }
+
+    const block = el.closest('[data-seg-id]');
+    if (block) {
+      const seg = segmentMap.get(block.dataset.segId);
+      if (seg) return which === 'start' ? seg.start : seg.end;
+    }
+    return null;
+  }
+
+  // Count text characters inside `root` that precede the boundary at
+  // (container, offsetInNode).
+  function textBefore(root, container, offsetInNode) {
+    let lead = 0;
+    if (container.nodeType !== 3) {
+      // Element boundary: characters of children before offsetInNode.
+      for (let i = 0; i < offsetInNode && i < container.childNodes.length; i++) {
+        lead += container.childNodes[i].textContent.length;
+      }
+    } else {
+      lead = offsetInNode;
+    }
+    let count = 0;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      if (n === container || (container.contains && container.contains(n))) {
+        return count + lead;
+      }
+      count += n.textContent.length;
+    }
+    return count + lead;
+  }
+
+  // Fallback: min/max source range over every sentence span (or block)
+  // the selection intersects. Used when a boundary can't be resolved
+  // directly (e.g. it landed on inter-block whitespace).
+  function blockRange(range) {
+    let minStart = Infinity, maxEnd = 0, found = false;
+    for (const span of outputEl.querySelectorAll('[data-src-start]')) {
+      if (intersects(range, span)) {
+        minStart = Math.min(minStart, parseInt(span.dataset.srcStart));
+        maxEnd = Math.max(maxEnd, parseInt(span.dataset.srcEnd));
+        found = true;
+      }
+    }
+    if (!found) {
+      for (const el of outputEl.querySelectorAll('[data-seg-id]')) {
+        if (intersects(range, el)) {
+          const seg = segmentMap.get(el.dataset.segId);
+          if (seg) {
+            minStart = Math.min(minStart, seg.start);
+            maxEnd = Math.max(maxEnd, seg.end);
+            found = true;
           }
         }
       }
-
-      if (found && minStart < Infinity) {
-        textarea.focus();
-        textarea.setSelectionRange(minStart, maxEnd);
-        scrollToOffset(minStart);
-      }
-    }, 50);
+    }
+    return found && minStart < Infinity ? { start: minStart, end: maxEnd } : null;
   }
 
   // Use a hidden mirror div to measure the exact pixel Y of a character offset,
@@ -439,10 +526,6 @@ const HighlightManager = (() => {
       return range.compareBoundaryPoints(Range.END_TO_START, r) <= 0
           && range.compareBoundaryPoints(Range.START_TO_END, r) >= 0;
     } catch { return false; }
-  }
-
-  function clearHighlights() {
-    for (const el of outputEl.querySelectorAll('.seg-highlight')) el.classList.remove('seg-highlight');
   }
 
   return { init, updateSegments };
